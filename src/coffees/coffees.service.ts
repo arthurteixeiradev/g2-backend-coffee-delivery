@@ -56,28 +56,30 @@ export class CoffeesService {
   async create(createCoffeeDto: CreateCoffeeDto) {
     const { tagIds, ...data } = createCoffeeDto;
 
-    const existingTags = await this.prisma.tag.findMany({
-      where: { id: { in: tagIds } }
-    });
+    // Busca tags que já existem
+    const existingTags = await this.prisma.tag.findMany({ where: { id: { in: tagIds } } });
 
-    if (existingTags.length !== tagIds.length) {
-      throw new BadRequestException('Algumas tags enviadas não existem.');
+    // Filtra as que ainda não existem
+    const existingTagIds = existingTags.map((tag) => tag.id);
+    const newTagIds = tagIds.filter((id) => !existingTagIds.includes(id));
+
+    // Cria as que não existem
+    for (const tagId of newTagIds) {
+      await this.prisma.tag.create({ data: { id: tagId, name: `Tag ${tagId}` } });
     }
 
+    // Agora relaciona tudo
     return this.prisma.coffee.create({
       data: {
         ...data,
         tags: {
-          create: tagIds.map(tagId => ({
-            tagId,
-          })),
-        },
+          create: tagIds.map(id => ({ tagId: id }))
+        }
       },
-      include: { tags: true },
+      include: { tags: { include: { tag: true } } }
     });
+
   }
-
-
 
   async update(id: string, updateCoffeeDto: UpdateCoffeeDto) {
     const { tagIds, ...data } = updateCoffeeDto;
@@ -108,9 +110,17 @@ export class CoffeesService {
 
 
   async remove(id: string) {
-    await this.findOne(id);
-    await this.prisma.coffee.delete({ where: { id } });
+    // Deleta as associações CoffeeTag
+    await this.prisma.coffeeTag.deleteMany({
+      where: { coffeeId: id },
+    });
+
+    // Deleta o Coffee
+    return this.prisma.coffee.delete({
+      where: { id },
+    });
   }
+
 
   async searchCoffees(params: {
     start_date?: Date;
@@ -121,26 +131,63 @@ export class CoffeesService {
     offset?: number;
   }) {
     const { start_date, end_date, name, tags, limit = 10, offset = 0 } = params;
-
-    // Construir o filtro
-
-    // Filtro por data
-
-    // Filtro por nome
-
-    // Filtro por tags
-
-    // Buscar os cafés com paginação
-
-    // Formatar a resposta
+  
+    // Construindo filtro dinâmico
+    const where: Prisma.CoffeeWhereInput = {};
+  
+    // Filtro por intervalo de datas
+    if (start_date || end_date) {
+      where.createdAt = {};
+      if (start_date) where.createdAt.gte = start_date;
+      if (end_date) where.createdAt.lte = end_date;
+    }
+  
+    // Filtro por nome (case insensitive, busca parcial)
+    if (name) {
+      where.name = { contains: name, mode: 'insensitive' };
+    }
+  
+    // Filtro por tags: coffees que tenham pelo menos uma das tags informadas
+    if (tags && tags.length > 0) {
+      where.tags = {
+        some: {
+          tag: {
+            name: { in: tags, mode: 'insensitive' }
+          }
+        }
+      };
+    }
+  
+    // Contar total para paginação
+    const total = await this.prisma.coffee.count({ where });
+  
+    // Buscar cafés com paginação
+    const coffees = await this.prisma.coffee.findMany({
+      where,
+      include: {
+        tags: {
+          include: { tag: true }
+        }
+      },
+      skip: offset,
+      take: limit,
+    });
+  
+    // Formatando retorno: extrair as tags do relacionamento
+    const data = coffees.map(coffee => ({
+      ...coffee,
+      tags: coffee.tags.map(ct => ct.tag),
+    }));
+  
     return {
-      data: [],
+      data,
       pagination: {
-        total: [],
+        total,
         limit,
         offset,
-        hasMore: offset,
+        hasMore: offset + limit < total,
       },
     };
   }
+
 } 
